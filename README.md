@@ -2,11 +2,11 @@
 
 [![tests](https://github.com/brandonkarimi/pdfm/actions/workflows/tests.yml/badge.svg)](https://github.com/brandonkarimi/pdfm/actions/workflows/tests.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![python](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 
-Static analysis for malicious PDF files. PDFM parses PDF internals, decodes streams safely, emulates
-embedded JavaScript in an isolated sandbox, detects phishing lures, extracts indicators, and returns an
-explainable verdict.
+A command-line tool for checking whether a PDF is malicious, without opening it.
+
+PDFM looks inside the file, decodes its streams, runs any embedded JavaScript in a sandbox, checks
+links for phishing, and gives you a verdict (benign, suspicious or malicious) along with the reasons.
 
 ```text
 $ pdfm scan invoice.pdf
@@ -18,104 +18,67 @@ $ pdfm scan invoice.pdf
 
 ## Results
 
-Evaluated on public datasets, using held-out sets that were never used during development.
-Full method: [docs/EVALUATION.md](docs/EVALUATION.md).
+I tested it on public datasets, using test sets I didn't look at while building the detections.
+Details are in [docs/EVALUATION.md](docs/EVALUATION.md).
 
-| Dataset | Files | Detection (flagged) | Benign rated malicious |
+| Dataset | Files | Malicious caught | Benign called malicious |
 |---|---|---|---|
-| CIC-Evasive-PDFMal2022 | 21,835 malicious / 9,106 benign | **98.5%** | **0.07%** |
-| MalwareBazaar, recent samples | 394 malicious | **54.3%** | — |
-| GovDocs1 | 2,558 benign | — | **0%** |
+| CIC-Evasive-PDFMal2022 | 21,835 malicious, 9,106 benign | 98.5% | 0.07% |
+| MalwareBazaar (recent) | 394 malicious | 54.3% | - |
+| GovDocs1 | 2,558 benign | - | 0% |
 
-Most current malicious PDFs are exploit-free phishing and malware-loader lures, which is why
-detection on recent MalwareBazaar samples is lower than on the CIC benchmark.
+The MalwareBazaar number is lower because most malicious PDFs today are phishing pages with a link
+or QR code, not exploits.
 
-## Features
+## What it checks
 
-- **Robust parsing:** qpdf (via pikepdf) cross-checked against an independent raw object scanner, with a
-  fallback for files that strict parsers reject. Objects hidden from the xref are flagged.
-- **Safe stream decoding:** output-capped Flate, LZW, ASCII85, ASCIIHex and RunLength decoders stop
-  decompression bombs before any full decode.
-- **Action resolution:** follows OpenAction, document scripts, page, annotation and form events to the
-  actions they run.
-- **JavaScript analysis:** extraction from actions, XFA forms and raw bytes; static deobfuscation; and
-  emulation in an isolated V8 sandbox with recording stubs for the Acrobat API.
-- **Exploit indicators:** known exploit APIs, heap sprays and shellcode patterns, plus bundled YARA
-  rules (for example CVE-2024-4367 and CVE-2010-0188).
-- **Phishing detection:** offline link risk (free hosting, brand impersonation, open redirects, file
-  downloads), lure layouts, and QR codes decoded from page images.
-- **Embedded files:** identified by content, hashed, and scanned recursively if they are PDFs.
-- **Reporting:** terminal, JSON and a script-free HTML report, with defanged IOCs and exit codes for
-  automation.
+- PDF structure, using two parsers and comparing what they see
+- Streams, decoded with size limits so zip-bomb style files can't blow up memory
+- What runs when the file opens (OpenAction, page and form events)
+- JavaScript: pulled out, deobfuscated, and run in an isolated V8 sandbox
+- Known exploit patterns and YARA rules
+- Phishing links, fake login pages, and QR codes in images
+- Embedded files (executables, Office macros, nested PDFs)
 
-## Installation
+## Install
 
-Requires Python 3.11+.
+Needs Python 3.11+.
 
 ```sh
 git clone https://github.com/brandonkarimi/pdfm && cd pdfm
 pip install -e ".[all]"
 ```
 
-The `all` extra adds the JavaScript sandbox (`mini-racer`), YARA (`yara-python`) and QR decoding
-(`opencv-python-headless`). Without them, the core analysis still runs and those steps are skipped.
-
 ## Usage
 
 ```sh
-pdfm scan sample.pdf                     # terminal report
+pdfm scan sample.pdf                     # report in the terminal
 pdfm scan sample.pdf --json              # JSON output
-pdfm scan sample.pdf --html report.html  # self-contained HTML report
-pdfm scan sample.pdf --extract out/      # save embedded files as out/<sha256>.bin
-pdfm scan sample.pdf --rules my_rules/   # add custom YARA rules
-pdfm scan sample.pdf --no-sandbox        # skip JavaScript emulation
-pdfm dump sample.pdf 12                  # show object 12 and its decoded stream
+pdfm scan sample.pdf --html report.html  # HTML report
+pdfm scan sample.pdf --extract out/      # save embedded files
+pdfm scan sample.pdf --rules my_rules/   # use your own YARA rules
+pdfm dump sample.pdf 12                  # look at one object
 ```
 
 Exit codes: `0` benign, `1` suspicious, `2` malicious, `3` error.
 
-## Scoring
+## Safety
 
-Each finding has a severity (info 0, low 1, medium 3, high 6, critical 10), and each kind of finding
-counts once. A score of 4+ is **suspicious**; 15+, or any critical finding, is **malicious**.
-*Suspicious* means "worth a look" (for example, a phishing link or a script that runs on open).
-*Malicious* requires evidence of what the content does, such as an exploit API, a shell launch, or an
-embedded executable.
+Only analyze real malware inside an isolated VM (I used REMnux). This repo doesn't contain any
+malware. The test files are generated by `pdfm forge` and are harmless.
 
-## Security design
-
-PDFM parses hostile input, so the tool itself is hardened:
-
-- Decoding is capped per stream (50 MB) and per file (256 MB).
-- The JavaScript sandbox is bare V8 with no filesystem, network or Python callbacks, and has time and
-  memory limits.
-- Reports escape all sample-derived content. The HTML report contains no scripts and sets a strict
-  Content-Security-Policy.
-- Embedded files are only written under their SHA-256 hash, never their original name.
-- A failure in one analyzer is recorded as a finding and doesn't stop the rest of the scan.
-
-**Analyze live malware only in an isolated VM** (for example REMnux). This repository contains no
-malware: the test fixtures are generated by `pdfm forge` and are harmless by construction.
-
-## Development
+## Running the tests
 
 ```sh
 pip install -e ".[dev]"
 pytest
-python tools/benchmark.py DIR --label malicious   # or --label benign
 ```
 
 ## Limitations
 
-- Exploits inside image codecs and fonts (JBIG2, JPX) are flagged heuristically, not detected precisely.
-- The sandbox stubs the Acrobat API, so scripts that depend on specific return values may behave differently.
-- Lures that link to compromised but ordinary-looking websites are hard to detect without live URL reputation.
-
-## Roadmap
-
-- Machine-learning classifier on PDFM's features, combined with the rule score
-- LLM-generated analyst summaries with MITRE ATT&CK mapping
-- `pdfm disarm` to strip active content from PDFs
+- Exploits hidden in images or fonts are only caught by rough heuristics.
+- The sandbox fakes Adobe's JavaScript API, so some scripts may behave differently than in Acrobat.
+- Phishing links to hacked but normal-looking websites are hard to spot without checking them live.
 
 ## License
 
